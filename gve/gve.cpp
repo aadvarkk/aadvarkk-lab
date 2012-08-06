@@ -4,6 +4,9 @@
 #include <time.h>
 #include <sys/time.h>
 
+#include <emmintrin.h>
+#include <x86intrin.h>
+#include "plan.h"
 
 /*
  *
@@ -123,11 +126,11 @@ void GVE_enc(
             switch(tags[i])
             {
                 case 0:
-                    out.push_back(value);
+                    out.push_back((unsigned char)value);
                     break;
                 case 1:
-                    out.push_back(value & MASK8_DATA_0);
-                    out.push_back((value & MASK8_DATA_1) >> 8);
+                    out.push_back((unsigned char)(value & MASK8_DATA_0));
+                    out.push_back((unsigned char)((value & MASK8_DATA_1) >> 8));
                     break;
                 case 2:
                     out.push_back(value & MASK8_DATA_0);
@@ -249,6 +252,38 @@ void GVE_dec(
 
 }
 
+void GVE_dec_simd(
+        std::vector<unsigned int> & out,
+        std::vector<unsigned char>& input
+        )
+{
+
+    std::vector<unsigned char>::iterator itr = input.begin();
+    std::vector<unsigned char>::iterator end = input.end();
+
+
+    for (int out_size = 0; itr != end; out_size += 4)
+    {
+        unsigned char tags = *itr;
+
+        ++itr;
+
+        //out.resize(out_size+4);
+        if (out.size() < out_size + 4)
+        {
+            out.resize((out_size+4)*2);
+        }
+
+        unsigned char * src = &(*itr);
+        unsigned int * dest = &(out[out_size]);
+        __m128i val = _mm_loadu_si128((const __m128i*)src);
+        __m128i mask = Masks[tags];
+        __m128i r = _mm_shuffle_epi8(val, mask);
+        _mm_storeu_si128((__m128i*)dest, r);
+
+        itr += Strides[tags];
+    }
+}
 
 /*
  * LSB part precedes byte order
@@ -358,7 +393,7 @@ void test_BAVE(int total_count)
 
 
     std::vector<unsigned int> input;
-    std::vector<unsigned char> encrypted;
+    std::vector<unsigned char> compressed;
     std::vector<unsigned int> output;
 
     for (int i = 0; i < total_count; ++i)
@@ -366,13 +401,13 @@ void test_BAVE(int total_count)
         input.push_back(500);
     }
 
-    BAVE_enc(encrypted, input);
+    BAVE_enc(compressed, input);
 
     output.reserve(total_count);
 
     struct timeval s, e;
     gettimeofday(&s, NULL);
-    BAVE_dec(output, encrypted);
+    BAVE_dec(output, compressed);
     gettimeofday(&e, NULL);
     double t = e.tv_sec * 1000000.0 + e.tv_usec - s.tv_sec * 1000000.0 - s.tv_usec;
     std::cout << "BAVE in usec:" << t << std::endl;
@@ -386,14 +421,14 @@ void test_BAVE(int total_count)
         assert (*itr == input[i]);
     }
 
-    std::cout << "compress ratio:" << float(encrypted.size())/(input.size()*4) << std::endl;
+    std::cout << "compress ratio:" << float(compressed.size())/(input.size()*4) << std::endl;
 }
 
 
 void test_GVE(int total_count)
 {
     std::vector<unsigned int> input;
-    std::vector<unsigned char> encrypted;
+    std::vector<unsigned char> compressed;
     std::vector<unsigned int> output;
 
     for (int i = 0; i < total_count; ++i)
@@ -401,7 +436,7 @@ void test_GVE(int total_count)
         input.push_back(500);
     }
 
-    GVE_enc(encrypted, input);
+    GVE_enc(compressed, input);
 
 
     std::vector<DecPlan> dec_plan;
@@ -410,10 +445,13 @@ void test_GVE(int total_count)
     output.reserve(total_count);
 
     struct timeval s, e;
+    double t;
+
+    // normal
     gettimeofday(&s, NULL);
-    GVE_dec(dec_plan, output, encrypted);
+    GVE_dec(dec_plan, output, compressed);
     gettimeofday(&e, NULL);
-    double t = e.tv_sec * 1000000.0 + e.tv_usec - s.tv_sec * 1000000.0 - s.tv_usec;
+    t = e.tv_sec * 1000000.0 + e.tv_usec - s.tv_sec * 1000000.0 - s.tv_usec;
     std::cout << "GVE in usec:" << t << std::endl;
     std::cout << "GVE in M#/sec:" << total_count/t << std::endl;
 
@@ -425,7 +463,27 @@ void test_GVE(int total_count)
         assert (*itr == input[i]);
     }
 
-    std::cout << "compress ratio:" << float(encrypted.size())/(input.size()*4) << std::endl;
+
+    // SIMD
+    output.clear();
+    output.resize(total_count);
+
+    gettimeofday(&s, NULL);
+    GVE_dec_simd(output, compressed);
+    gettimeofday(&e, NULL);
+    t = e.tv_sec * 1000000.0 + e.tv_usec - s.tv_sec * 1000000.0 - s.tv_usec;
+    std::cout << "GVE_simd in usec:" << t << std::endl;
+    std::cout << "GVE_simd in M#/sec:" << total_count/t << std::endl;
+
+
+    itr = output.begin();
+    end = output.end();
+    for (int i = 0; itr != end; ++itr, ++i)
+    {
+        assert (*itr == input[i]);
+    }
+
+    std::cout << "compress ratio:" << float(compressed.size())/(input.size()*4) << std::endl;
 }
 
 int main(int argc, char ** argv)
